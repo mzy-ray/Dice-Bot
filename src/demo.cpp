@@ -1,6 +1,12 @@
-#include <iostream>
-#include <set>
-#include <sstream>
+#include <regex>
+#include <chrono>
+#include <random>
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
 
 #include <cqcppsdk/cqcppsdk.h>
 
@@ -9,17 +15,69 @@ using namespace std;
 using Message = cq::message::Message;
 using MessageSegment = cq::message::MessageSegment;
 
+inline unsigned long long GetCycleCount() {
+    return __rdtsc();
+}
+
+int diceHandler(int min, int max) {
+    std::mt19937 gen(static_cast<unsigned int>(GetCycleCount()));
+    std::uniform_int_distribution<int> dis(min, max);
+    return dis(gen);
+}
+
+void rootHandler(const MessageEvent &event, string nickname) {
+    string reqMsg = event.message;
+    string resMsg = "";
+    regex callRe("^上海人形$");
+    regex diceRe("^(\\d+)d(\\d+)$", wregex::icase);
+    regex timerRe("^timer(\\d+)$", wregex::icase);
+    smatch match;
+    if (regex_match(reqMsg, callRe)) {
+        resMsg += "我在这里";
+        const int index = diceHandler(1, 3);
+        switch (index) {
+        case 1:
+            resMsg += "!";
+            break;
+        case 2:
+            resMsg += "~";
+            break;
+        case 3:
+            resMsg += "...";
+            break;
+        default:
+            break;
+        }
+    } else if (regex_search(reqMsg, match, diceRe) && match.size() == 3) {
+        const int num = stoi(match[1]);
+        const int max = stoi(match[2]);
+        if (num > 0 && max > 0 && num < 100 && max < 10000) {
+            resMsg += nickname + "投掷:" + reqMsg + " 结果:";
+            for (int i = 0; i < num; i++) {
+                const int ret = diceHandler(1, max);
+                resMsg += to_string(ret) + " ";
+            }
+        } else {
+            resMsg += "骰子炸了";
+        }
+    } else if (regex_search(reqMsg, match, timerRe)) {
+        const int minutes = stoi(match[1]);
+        resMsg += "倒计时:" + to_string(minutes) + "分钟";
+    }
+
+    if (!resMsg.empty()) {
+        send_message(event.target, resMsg);
+    }
+}
+
 CQ_INIT {
     on_enable([] { logging::info("启用", "插件已启用"); });
 
     on_private_message([](const PrivateMessageEvent &event) {
         try {
-            auto msgid = send_private_message(event.user_id, event.message); // 直接复读消息
-            logging::info_success("私聊", "私聊消息复读完成, 消息 Id: " + to_string(msgid));
-            send_message(event.target,
-                         MessageSegment::face(111) + "这是通过 message 模块构造的消息~"); // 使用 message 模块构造消息
+            rootHandler(event, "");
         } catch (ApiError &err) {
-            logging::warning("私聊", "私聊消息复读失败, 错误码: " + to_string(err.code));
+            logging::warning("Private message", "Error code: " + to_string(err.code));
         }
     });
 
@@ -28,32 +86,23 @@ CQ_INIT {
     });
 
     on_group_message([](const GroupMessageEvent &event) {
-        static const set<int64_t> ENABLED_GROUPS = {123456, 123457};
-        if (ENABLED_GROUPS.count(event.group_id) == 0) return; // 不在启用的群中, 忽略
-
         try {
-            send_message(event.target, event.message); // 复读
-            auto mem_list = get_group_member_list(event.group_id); // 获取群成员列表
-            string msg;
-            for (auto i = 0; i < min(10, static_cast<int>(mem_list.size())); i++) {
-                msg += "昵称: " + mem_list[i].nickname + "\n"; // 拼接前十个成员的昵称
-            }
-            send_group_message(event.group_id, msg); // 发送群消息
-        } catch (ApiError &) { // 忽略发送失败
-        }
-        if (event.is_anonymous()) {
-            logging::info("群聊", "消息是匿名消息, 匿名昵称: " + event.anonymous.name);
+            string nickname = get_group_member_info(event.group_id, event.user_id).nickname;
+            rootHandler(event, nickname);
+        } catch (ApiError &err) {
+            logging::warning("Group message", "Error code: " + to_string(err.code));
         }
         event.block(); // 阻止当前事件传递到下一个插件
     });
 
-    on_group_upload([](const auto &event) { // 可以使用 auto 自动推断类型
-        stringstream ss;
-        ss << "您上传了一个文件, 文件名: " << event.file.name << ", 大小(字节): " << event.file.size;
+    on_discuss_message([](const DiscussMessageEvent &event) {
         try {
-            send_message(event.target, ss.str());
-        } catch (ApiError &) {
+            string nickname = get_group_member_info(event.discuss_id, event.user_id).nickname;
+            rootHandler(event, nickname);
+        } catch (ApiError &err) {
+            logging::warning("Discuss message", "Error code: " + to_string(err.code));
         }
+        event.block(); // 阻止当前事件传递到下一个插件
     });
 }
 
